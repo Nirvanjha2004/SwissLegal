@@ -2,7 +2,7 @@
 
 ## Overview
 
-This implementation plan converts the retrieval evaluation system design into actionable coding tasks. The system is a comprehensive ML pipeline for legal document retrieval and evaluation, featuring multiple retrieval algorithms (BM25, TF-IDF), agent-based question answering, and performance evaluation capabilities. Tasks are organized to build incrementally from core data structures through complete pipeline integration.
+This implementation plan converts the retrieval evaluation system design into actionable coding tasks. The system is a comprehensive ML pipeline for legal document retrieval and evaluation, featuring multiple retrieval algorithms (BM25, TF-IDF), agent-based question answering, and performance evaluation capabilities. Tasks are organized to build incrementally from core data structures through complete pipeline integration. I want you not to test the files since i have not installed any pip, so just write the code and dont test it.
 
 ## Tasks
 
@@ -35,12 +35,12 @@ This implementation plan converts the retrieval evaluation system design into ac
     - **Validates: Requirements 6.3**
 
 - [ ] 2. Implement data loading and preprocessing
-  - [-] 2.1 Create DataLoader with CSV file handling
+  - [x] 2.1 Create DataLoader with CSV file handling
     - Implement load_dataset function with path and text_columns parameters
     - Add read_csv_file function with error handling for missing files
     - _Requirements: 1.1, 1.3_
   
-  - [~] 2.2 Implement text normalization functionality
+  - [x] 2.2 Implement text normalization functionality
     - Create normalize_text_columns function for DataFrame processing
     - Add clean_text function for whitespace removal and formatting
     - _Requirements: 1.2, 1.4_
@@ -49,7 +49,7 @@ This implementation plan converts the retrieval evaluation system design into ac
     - **Property 1: Text Processing Consistency**
     - **Validates: Requirements 1.2**
   
-  - [~] 2.4 Add data structure preservation validation
+  - [x] 2.4 Add data structure preservation validation
     - Ensure row count and relationships maintained through processing
     - Implement DataFrame structure validation
     - _Requirements: 1.5_
@@ -58,16 +58,16 @@ This implementation plan converts the retrieval evaluation system design into ac
     - **Property 2: Data Structure Preservation**
     - **Validates: Requirements 1.5**
 
-- [~] 3. Checkpoint - Ensure data loading tests pass
+- [x] 3. Checkpoint - Ensure data loading tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 4. Implement text chunking functionality
-  - [~] 4.1 Create chunk_text function with size and overlap parameters
+  - [x] 4.1 Create chunk_text function with size and overlap parameters
     - Implement text splitting with configurable chunk_size and overlap
     - Add parameter validation for chunk_size > 0 and overlap < chunk_size
     - _Requirements: 2.1, 2.2, 2.3_
   
-  - [~] 4.2 Implement chunk_records function for document processing
+  - [x] 4.2 Implement chunk_records function for document processing
     - Process iterable of (source_id, text) tuples into TextChunk objects
     - Assign unique sequential chunk IDs starting from 0
     - Handle empty documents by skipping them
@@ -82,12 +82,12 @@ This implementation plan converts the retrieval evaluation system design into ac
     - _Requirements: 2.2, 2.3, 2.5_
 
 - [ ] 5. Implement BM25 retrieval system
-  - [~] 5.1 Create BM25Retriever class with document indexing
+  - [x] 5.1 Create BM25Retriever class with document indexing
     - Initialize with document corpus and build BM25 index
     - Implement tokenization and preprocessing for documents
     - _Requirements: 3.1, 3.6_
   
-  - [~] 5.2 Implement BM25 search functionality
+  - [x] 5.2 Implement BM25 search functionality
     - Create search method with query and top_k parameters
     - Return ranked RetrievalResult objects with relevance scores
     - Sort results by score in descending order
@@ -101,18 +101,18 @@ This implementation plan converts the retrieval evaluation system design into ac
     - **Property 5: Tokenization Consistency**
     - **Validates: Requirements 3.6**
   
-  - [~] 5.5 Handle empty corpus scenarios
+  - [x] 5.5 Handle empty corpus scenarios
     - Return empty results when document corpus is empty
     - Add appropriate logging for empty corpus warnings
     - _Requirements: 3.5_
 
 - [ ] 6. Implement TF-IDF retrieval system
-  - [~] 6.1 Create TfidfRetriever class with vectorization
+  - [x] 6.1 Create TfidfRetriever class with vectorization
     - Initialize with document corpus and build TF-IDF vectors
     - Implement consistent tokenization with BM25Retriever
     - _Requirements: 3.1, 3.6_
   
-  - [~] 6.2 Implement TF-IDF search functionality
+  - [x] 6.2 Implement TF-IDF search functionality
     - Create search method matching BM25Retriever interface
     - Calculate cosine similarity scores for ranking
     - _Requirements: 3.2, 3.3, 3.4_
@@ -121,11 +121,11 @@ This implementation plan converts the retrieval evaluation system design into ac
     - Test initialization, search functionality, empty corpus handling
     - _Requirements: 3.1, 3.2, 3.5_
 
-- [~] 7. Checkpoint - Ensure retrieval systems tests pass
+- [x] 7. Checkpoint - Ensure retrieval systems tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 8. Implement legal agent functionality
-  - [~] 8.1 Create prompt construction system
+  - [x] 8.1 Create prompt construction system
     - Implement build_prompt function combining question and contexts
     - Ensure structured format with question and context elements
     - _Requirements: 4.2_
@@ -134,12 +134,12 @@ This implementation plan converts the retrieval evaluation system design into ac
     - **Property 6: Prompt Construction Completeness**
     - **Validates: Requirements 4.2**
   
-  - [~] 8.3 Implement model output parsing
+  - [x] 8.3 Implement model output parsing
     - Create parse_model_output function for response cleaning
     - Handle consistent formatting and text normalization
     - _Requirements: 4.3_
   
-  - [~] 8.4 Create run_agent function with context management
+  - [x] 8.4 Create run_agent function with context management
     - Implement question-answering with retrieved context
     - Manage context window limitations through chunk selection
     - Handle LLM API failures with exception handling
@@ -154,12 +154,12 @@ This implementation plan converts the retrieval evaluation system design into ac
     - _Requirements: 4.5, 4.6_
 
 - [ ] 9. Implement evaluation system
-  - [~] 9.1 Create macro F1 score calculation
+  - [x] 9.1 Create macro F1 score calculation
     - Implement macro_f1 function for multi-class evaluation
     - Ensure F1 scores bounded between 0.0 and 1.0
     - _Requirements: 5.1, 5.4_
   
-  - [~] 9.2 Implement evaluate_predictions function
+  - [x] 9.2 Implement evaluate_predictions function
     - Validate DataFrame columns and data lengths
     - Handle mismatched prediction and target data
     - Return standardized performance metrics
@@ -174,12 +174,12 @@ This implementation plan converts the retrieval evaluation system design into ac
     - _Requirements: 5.2, 5.3_
 
 - [ ] 10. Implement error handling and recovery
-  - [~] 10.1 Add parameter validation and default substitution
+  - [x] 10.1 Add parameter validation and default substitution
     - Implement validation for all component parameters
     - Substitute valid defaults for invalid parameters with logging
     - _Requirements: 7.2_
   
-  - [~] 10.2 Add comprehensive error messaging
+  - [-] 10.2 Add comprehensive error messaging
     - Provide descriptive error messages for all failure scenarios
     - Include specific information for debugging
     - _Requirements: 7.5_
@@ -188,36 +188,36 @@ This implementation plan converts the retrieval evaluation system design into ac
     - **Property 10: Parameter Validation and Recovery**
     - **Validates: Requirements 7.2, 7.5**
   
-  - [~] 10.4 Implement missing file handling
+  - [ ] 10.4 Implement missing file handling
     - Handle missing CSV files with warnings and empty DataFrame returns
     - Continue processing with available data
     - _Requirements: 7.1_
   
-  - [~] 10.5 Add API retry logic with exponential backoff
+  - [ ] 10.5 Add API retry logic with exponential backoff
     - Implement retry mechanism for external API calls
     - Handle temporary failures gracefully
     - _Requirements: 7.3_
   
-  - [~] 10.6 Handle empty dataset scenarios
+  - [ ] 10.6 Handle empty dataset scenarios
     - Skip processing steps that require data when datasets are empty
     - Provide appropriate logging and user feedback
     - _Requirements: 7.4_
 
-- [~] 11. Checkpoint - Ensure error handling tests pass
+- [ ] 11. Checkpoint - Ensure error handling tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 12. Implement pipeline integration
-  - [~] 12.1 Create main pipeline processing function
+  - [ ] 12.1 Create main pipeline processing function
     - Implement processRetrievalPipeline with train, test, laws data
     - Build law corpus from input documents
     - _Requirements: 8.1, 8.2_
   
-  - [~] 12.2 Integrate retrieval with test query processing
+  - [ ] 12.2 Integrate retrieval with test query processing
     - Process test queries through retrieval system
     - Generate predictions using retrieved documents
     - _Requirements: 8.3_
   
-  - [~] 12.3 Create submission format generation
+  - [ ] 12.3 Create submission format generation
     - Align predictions with test data structure
     - Preserve row identifiers if present
     - Ensure submission length matches test data length
@@ -229,18 +229,18 @@ This implementation plan converts the retrieval evaluation system design into ac
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6_
 
 - [ ] 13. Create configuration management system
-  - [~] 13.1 Implement centralized configuration
+  - [ ] 13.1 Implement centralized configuration
     - Create configuration classes for all components
     - Support environment-based configuration loading
     - _Requirements: All components need configurable parameters_
   
-  - [~] 13.2 Add configuration validation
+  - [ ] 13.2 Add configuration validation
     - Validate all configuration parameters at startup
     - Provide clear error messages for invalid configurations
     - _Requirements: 7.2, 7.5_
 
 - [ ] 14. Final integration and testing
-  - [~] 14.1 Wire all components together in main module
+  - [ ] 14.1 Wire all components together in main module
     - Create main.py with complete pipeline orchestration
     - Integrate DataLoader, Chunker, Retrievers, Agent, and Evaluator
     - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6_
@@ -250,12 +250,12 @@ This implementation plan converts the retrieval evaluation system design into ac
     - Validate performance metrics and output formats
     - _Requirements: All requirements integrated_
   
-  - [~] 14.3 Add comprehensive logging and monitoring
+  - [ ] 14.3 Add comprehensive logging and monitoring
     - Implement structured logging throughout the pipeline
     - Add performance monitoring and metrics collection
     - _Requirements: 7.1, 7.4, 7.5_
 
-- [~] 15. Final checkpoint - Complete system validation
+- [ ] 15. Final checkpoint - Complete system validation
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes
