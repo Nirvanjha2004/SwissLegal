@@ -8,6 +8,12 @@ from typing import Iterable
 class AgentConfig:
     temperature: float = 0.0
     max_context_chunks: int = 5
+    
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.temperature <= 2.0):
+            raise ValueError(f"temperature must be between 0.0 and 2.0, got {self.temperature}")
+        if self.max_context_chunks <= 0:
+            raise ValueError(f"max_context_chunks must be positive, got {self.max_context_chunks}")
 
 
 def build_prompt(question: str, contexts: Iterable[str]) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -13,6 +14,14 @@ class RetrievalResult:
     index: int
     score: float
     text: str
+    
+    def __post_init__(self):
+        if self.index < 0:
+            raise ValueError(f"Index must be non-negative, got {self.index}")
+        if not math.isfinite(self.score):
+            raise ValueError(f"Score must be finite, got {self.score}")
+        if not isinstance(self.text, str):
+            raise ValueError(f"Text must be a string, got {type(self.text)}")
 
 
 class BM25Retriever:

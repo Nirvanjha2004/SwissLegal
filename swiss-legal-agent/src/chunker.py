@@ -9,6 +9,12 @@ class TextChunk:
     chunk_id: int
     source_id: str
     text: str
+    
+    def __post_init__(self) -> None:
+        if self.chunk_id < 0:
+            raise ValueError("chunk_id must be non-negative")
+        if not self.source_id or not self.source_id.strip():
+            raise ValueError("source_id must be non-empty")
 
 
 def chunk_text(text: str, chunk_size: int = 4000, overlap: int = 200) -> list[str]:
