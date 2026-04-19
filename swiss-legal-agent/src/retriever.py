@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+import numpy as np
 from rank_bm25 import BM25Okapi
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -216,7 +217,16 @@ class BM25Retriever:
                 return []
             
             # Rank documents by score
-            ranked_indices = sorted(range(len(scores)), key=lambda index: scores[index], reverse=True)[:validated_top_k]
+            effective_top_k = min(validated_top_k, len(scores))
+            if effective_top_k <= 0:
+                return []
+
+            scores_array = np.asarray(scores)
+            if effective_top_k >= len(scores_array):
+                ranked_indices = np.argsort(scores_array)[::-1].tolist()
+            else:
+                candidate_indices = np.argpartition(scores_array, -effective_top_k)[-effective_top_k:]
+                ranked_indices = candidate_indices[np.argsort(scores_array[candidate_indices])[::-1]].tolist()
             
             results = []
             for rank, index in enumerate(ranked_indices):

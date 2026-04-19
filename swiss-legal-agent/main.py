@@ -103,6 +103,10 @@ def _optional_evaluate_on_train(
     config: SystemConfig,
 ) -> None:
     """Run optional retrieval-only evaluation when train columns allow it."""
+    if not config.enable_train_eval:
+        LOGGER.info("Optional evaluation skipped: enable_train_eval is disabled.")
+        return
+
     if train_df.empty:
         LOGGER.info("Optional evaluation skipped: training dataset is empty.")
         return
@@ -124,13 +128,25 @@ def _optional_evaluate_on_train(
 
     eval_df = train_df.copy()
     predictions: list[str] = []
-    for _, row in eval_df.iterrows():
+    total_rows = len(eval_df)
+    LOGGER.info(
+        "Optional training evaluation started: rows=%s query_column=%s target_column=%s progress_interval=%s",
+        total_rows,
+        query_column,
+        target_column,
+        config.eval_progress_interval,
+    )
+    for row_index, (_, row) in enumerate(eval_df.iterrows(), start=1):
         query = str(row.get(query_column, "")).strip()
         if not query:
             predictions.append("")
+            if row_index % config.eval_progress_interval == 0 or row_index == total_rows:
+                LOGGER.info("Optional evaluation progress: %s/%s", row_index, total_rows)
             continue
         results = retriever.search(query, top_k=config.bm25_top_k)
         predictions.append(results[0].text if results else "")
+        if row_index % config.eval_progress_interval == 0 or row_index == total_rows:
+            LOGGER.info("Optional evaluation progress: %s/%s", row_index, total_rows)
 
     eval_df["prediction"] = predictions
     score = evaluate_predictions(eval_df, target_column=target_column, prediction_column="prediction")
@@ -238,6 +254,9 @@ def processRetrievalPipeline(
         else:
             no_result_count += 1
             predictions.append("")
+
+        if len(predictions) % 10 == 0 or len(predictions) == len(test_df):
+            LOGGER.info("Prediction progress: %s/%s", len(predictions), len(test_df))
 
     monitor.end_stage("predict", stage_started)
 
