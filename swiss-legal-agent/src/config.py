@@ -42,6 +42,7 @@ DEFAULT_VECTOR_TOP_K = 10
 DEFAULT_CHUNK_SIZE = 4000
 DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_MODEL_NAME = "local-hf-model"
+DEFAULT_EMBEDDING_MODEL_PATH = MODELS_DIR / "hf" / "intfloat--multilingual-e5-small"
 DEFAULT_ENABLE_TRAIN_EVAL = False
 DEFAULT_EVAL_PROGRESS_INTERVAL = 100
 
@@ -58,6 +59,7 @@ class SystemConfig:
         chunk_size: Any = None,
         chunk_overlap: Any = None,
         model_name: Any = None,
+        embedding_model_path: Any = None,
         enable_train_eval: Any = None,
         eval_progress_interval: Any = None,
         train_file: Any = None,
@@ -74,6 +76,7 @@ class SystemConfig:
             chunk_size: Size of text chunks
             chunk_overlap: Overlap between chunks
             model_name: Name of the language model
+            embedding_model_path: Local path to the offline embedding model snapshot
             enable_train_eval: Whether optional train evaluation runs
             eval_progress_interval: Progress logging interval for train evaluation
             train_file: Path to training data file
@@ -113,6 +116,14 @@ class SystemConfig:
         # Validate model name
         self.model_name = validate_and_default_string(
             model_name, DEFAULT_MODEL_NAME, "model_name", "SystemConfig", allow_empty=False
+        )
+
+        self.embedding_model_path = validate_and_default_path(
+            embedding_model_path,
+            DEFAULT_EMBEDDING_MODEL_PATH,
+            "embedding_model_path",
+            "SystemConfig",
+            must_exist=False,
         )
 
         enable_train_eval_normalized = str(enable_train_eval).strip().lower() if enable_train_eval is not None else None
@@ -157,12 +168,13 @@ class SystemConfig:
         # Log configuration summary
         logger.info(
             "SystemConfig initialized: chunk_size=%s, chunk_overlap=%s, bm25_top_k=%s, "
-            "vector_top_k=%s, model_name='%s', enable_train_eval=%s, eval_progress_interval=%s",
+            "vector_top_k=%s, model_name='%s', embedding_model_path='%s', enable_train_eval=%s, eval_progress_interval=%s",
             self.chunk_size,
             self.chunk_overlap,
             self.bm25_top_k,
             self.vector_top_k,
             self.model_name,
+            self.embedding_model_path,
             self.enable_train_eval,
             self.eval_progress_interval,
         )
@@ -271,6 +283,7 @@ def load_config_from_env() -> SystemConfig:
     - CHUNK_SIZE
     - CHUNK_OVERLAP
     - MODEL_NAME
+    - EMBEDDING_MODEL_PATH
     - ENABLE_TRAIN_EVAL
     - EVAL_PROGRESS_INTERVAL
     - TRAIN_FILE
@@ -284,6 +297,7 @@ def load_config_from_env() -> SystemConfig:
         chunk_size=_get_env_int("CHUNK_SIZE"),
         chunk_overlap=_get_env_int("CHUNK_OVERLAP"),
         model_name=_get_env_str("MODEL_NAME"),
+        embedding_model_path=_get_env_path("EMBEDDING_MODEL_PATH"),
         enable_train_eval=_get_env_str("ENABLE_TRAIN_EVAL"),
         eval_progress_interval=_get_env_int("EVAL_PROGRESS_INTERVAL"),
         train_file=_get_env_path("TRAIN_FILE"),
@@ -293,13 +307,14 @@ def load_config_from_env() -> SystemConfig:
     )
     logger.info(
         "SystemConfig loaded from environment with validation and default substitution. "
-        "bm25_top_k=%s vector_top_k=%s chunk_size=%s chunk_overlap=%s model_name=%s "
+        "bm25_top_k=%s vector_top_k=%s chunk_size=%s chunk_overlap=%s model_name=%s embedding_model_path=%s "
         "enable_train_eval=%s eval_progress_interval=%s",
         config.bm25_top_k,
         config.vector_top_k,
         config.chunk_size,
         config.chunk_overlap,
         config.model_name,
+        config.embedding_model_path,
         config.enable_train_eval,
         config.eval_progress_interval,
     )
@@ -319,6 +334,7 @@ def validate_config_on_startup(config: SystemConfig) -> dict[str, Any]:
         "chunk_size": config.chunk_size,
         "chunk_overlap": config.chunk_overlap,
         "model_name": config.model_name,
+        "embedding_model_path": str(config.embedding_model_path),
         "enable_train_eval": config.enable_train_eval,
         "eval_progress_interval": config.eval_progress_interval,
         "train_file": str(config.train_file),

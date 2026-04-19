@@ -17,6 +17,7 @@ from src.config import (
 from src.data_loader import load_dataset
 from src.evaluator import evaluate_predictions
 from src.retriever import BM25Retriever
+from src.semantic_reranker import LocalSemanticReranker
 
 
 @dataclass
@@ -163,6 +164,7 @@ def processRetrievalPipeline(
     test_df: pd.DataFrame,
     laws_df: pd.DataFrame,
     config: SystemConfig,
+    semantic_reranker: LocalSemanticReranker | None = None,
     llm: Any | None = None,
     agent_config: AgentConfig | None = None,
 ) -> pd.DataFrame:
@@ -246,6 +248,9 @@ def processRetrievalPipeline(
         results = retriever.search(query, top_k=config.bm25_top_k)
         contexts = [result.text for result in results]
 
+        if semantic_reranker is not None and contexts:
+            contexts = semantic_reranker.rerank(query, contexts, top_k=config.bm25_top_k)
+
         if llm is not None and contexts:
             predictions.append(run_agent(query, contexts, llm, effective_agent_config))
             used_agent_count += 1
@@ -299,8 +304,16 @@ def main() -> None:
     config = load_config_from_env()
     validate_config_on_startup(config)
 
+    semantic_reranker = LocalSemanticReranker(config.embedding_model_path)
+
     train_df, test_df, laws_df = load_inputs(config)
-    submission = processRetrievalPipeline(train_df, test_df, laws_df, config)
+    submission = processRetrievalPipeline(
+        train_df,
+        test_df,
+        laws_df,
+        config,
+        semantic_reranker=semantic_reranker,
+    )
 
     if submission.empty:
         LOGGER.warning("No submission output generated. Skipping write operation.")
