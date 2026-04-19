@@ -7,6 +7,7 @@ from typing import Iterable
 from .validation import (
     validate_chunk_parameters,
     validate_and_default_string,
+    validate_and_default_iterable,
     log_parameter_correction
 )
 
@@ -102,12 +103,10 @@ def chunk_records(records: Iterable[tuple[str, str]], chunk_size: int = 4000, ov
         List of TextChunk objects
     """
     # Validate records parameter
-    original_records = records
     validated_records = validate_and_default_iterable(
         records, [], "records", "TextChunker.chunk_records", allow_empty=True
     )
-    if validated_records != list(original_records):
-        log_parameter_correction(original_records, validated_records, "records", "TextChunker.chunk_records", "invalid iterable")
+
     
     # Validate chunk parameters
     original_chunk_size, original_overlap = chunk_size, overlap

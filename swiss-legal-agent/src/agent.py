@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Iterable
 
@@ -177,25 +178,15 @@ def run_agent(question: str, contexts: Iterable[str], llm, config: AgentConfig |
         # Build prompt with selected contexts
         prompt = build_prompt(validated_question, selected_contexts)
         
-        # Handle LLM API calls with exception handling
+        # Handle LLM API calls with retry and exception handling
         try:
-            # Validate LLM object
-            if llm is None:
-                raise ValueError("LLM object cannot be None")
-            
-            # Try invoke method first (LangChain style)
-            if hasattr(llm, "invoke"):
-                # Pass temperature if the model supports it
-                if hasattr(llm, "temperature") or "temperature" in getattr(llm, "__dict__", {}):
-                    response = llm.invoke(prompt, temperature=config.temperature)
-                else:
-                    response = llm.invoke(prompt)
-            # Fallback to direct call
-            elif callable(llm):
-                response = llm(prompt)
-            else:
-                raise AttributeError("LLM object is not callable and has no invoke method")
-                
+            response = _invoke_llm_with_retry(
+                llm=llm,
+                prompt=prompt,
+                temperature=config.temperature,
+                max_retries=3,
+                base_delay_seconds=0.5,
+            )
         except Exception as api_error:
             # Handle LLM API failures with fallback response
             return _handle_llm_failure(validated_question, selected_contexts, api_error)
@@ -234,6 +225,78 @@ def _select_context_chunks(contexts: list[str], max_chunks: int) -> list[str]:
     
     # Select the first max_chunks contexts (assuming they're ranked by relevance)
     return contexts[:max_chunks]
+
+
+def _invoke_llm_with_retry(
+    llm,
+    prompt: str,
+    temperature: float,
+    max_retries: int = 3,
+    base_delay_seconds: float = 0.5,
+) -> str:
+    """
+    Invoke an LLM with bounded exponential backoff retry.
+
+    Args:
+        llm: LLM object with invoke() method or callable interface
+        prompt: Prompt string to send
+        temperature: Sampling temperature (used when supported)
+        max_retries: Maximum retry attempts after the initial call
+        base_delay_seconds: Base delay used for exponential backoff
+
+    Returns:
+        Raw LLM response
+
+    Raises:
+        Exception: Re-raises the last API exception after retries are exhausted
+    """
+    if llm is None:
+        raise ValueError("LLM object cannot be None")
+
+    attempt = 0
+    max_attempts = max_retries + 1
+    last_error: Exception | None = None
+
+    while attempt < max_attempts:
+        try:
+            if hasattr(llm, "invoke"):
+                if hasattr(llm, "temperature") or "temperature" in getattr(llm, "__dict__", {}):
+                    return llm.invoke(prompt, temperature=temperature)
+                return llm.invoke(prompt)
+
+            if callable(llm):
+                return llm(prompt)
+
+            raise AttributeError("LLM object is not callable and has no invoke method")
+
+        except Exception as error:
+            last_error = error
+            attempt += 1
+
+            if attempt >= max_attempts:
+                logger.error(
+                    "Agent._invoke_llm_with_retry: LLM call failed after %s attempts. "
+                    "Error type: %s, message: %s",
+                    max_attempts,
+                    type(error).__name__,
+                    str(error),
+                )
+                raise
+
+            delay = min(base_delay_seconds * (2 ** (attempt - 1)), 8.0)
+            logger.warning(
+                "Agent._invoke_llm_with_retry: LLM call attempt %s/%s failed (%s). "
+                "Retrying in %.2f seconds.",
+                attempt,
+                max_attempts,
+                type(error).__name__,
+                delay,
+            )
+            time.sleep(delay)
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Unexpected retry state: no response and no error captured")
 
 
 def _handle_llm_failure(question: str, contexts: list[str], error: Exception) -> str:

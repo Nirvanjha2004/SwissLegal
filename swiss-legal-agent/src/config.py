@@ -8,6 +8,7 @@ and default value substitution for all system parameters.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -188,3 +189,96 @@ class SystemConfig:
 
 # Global default configuration instance
 default_config = SystemConfig()
+
+
+def _get_env_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(
+            "Config environment variable '%s' is not a valid integer: '%s'. Using default.",
+            name,
+            value,
+        )
+        return None
+
+
+def _get_env_str(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _get_env_path(name: str) -> Path | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return Path(stripped)
+
+
+def load_config_from_env() -> SystemConfig:
+    """
+    Build system configuration from environment variables with safe fallback.
+
+    Supported environment variables:
+    - BM25_TOP_K
+    - VECTOR_TOP_K
+    - CHUNK_SIZE
+    - CHUNK_OVERLAP
+    - MODEL_NAME
+    - TRAIN_FILE
+    - TEST_FILE
+    - LAWS_FILE
+    - SUBMISSION_FILE
+    """
+    config = SystemConfig(
+        bm25_top_k=_get_env_int("BM25_TOP_K"),
+        vector_top_k=_get_env_int("VECTOR_TOP_K"),
+        chunk_size=_get_env_int("CHUNK_SIZE"),
+        chunk_overlap=_get_env_int("CHUNK_OVERLAP"),
+        model_name=_get_env_str("MODEL_NAME"),
+        train_file=_get_env_path("TRAIN_FILE"),
+        test_file=_get_env_path("TEST_FILE"),
+        laws_file=_get_env_path("LAWS_FILE"),
+        submission_file=_get_env_path("SUBMISSION_FILE"),
+    )
+    logger.info(
+        "SystemConfig loaded from environment with validation and default substitution. "
+        "bm25_top_k=%s vector_top_k=%s chunk_size=%s chunk_overlap=%s model_name=%s",
+        config.bm25_top_k,
+        config.vector_top_k,
+        config.chunk_size,
+        config.chunk_overlap,
+        config.model_name,
+    )
+    return config
+
+
+def validate_config_on_startup(config: SystemConfig) -> dict[str, Any]:
+    """
+    Validate and summarize effective configuration at startup.
+
+    Returns:
+        Dictionary summary that can be logged or emitted for monitoring.
+    """
+    summary = {
+        "bm25_top_k": config.bm25_top_k,
+        "vector_top_k": config.vector_top_k,
+        "chunk_size": config.chunk_size,
+        "chunk_overlap": config.chunk_overlap,
+        "model_name": config.model_name,
+        "train_file": str(config.train_file),
+        "test_file": str(config.test_file),
+        "laws_file": str(config.laws_file),
+        "submission_file": str(config.submission_file),
+    }
+    logger.info("Startup configuration validated: %s", summary)
+    return summary
