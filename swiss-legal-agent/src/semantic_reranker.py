@@ -41,12 +41,20 @@ class LocalSemanticReranker:
         if not context_list:
             return []
 
-        if self.model is None:
-            return context_list[:top_k] if top_k is not None else context_list
+        ranked_positions = self.rerank_indices(query, context_list, top_k=top_k)
+        return [context_list[position] for position in ranked_positions]
+
+    def rerank_indices(self, query: str, contexts: Iterable[str], top_k: int | None = None) -> list[int]:
+        context_list = [context for context in contexts if str(context).strip()]
+        if not context_list:
+            return []
 
         effective_top_k = len(context_list) if top_k is None else min(top_k, len(context_list))
         if effective_top_k <= 0:
             return []
+
+        if self.model is None:
+            return list(range(effective_top_k))
 
         try:
             query_embedding = self.model.encode(
@@ -61,11 +69,11 @@ class LocalSemanticReranker:
             )
             scores = np.dot(context_embeddings, query_embedding)
             ranked_indices = np.argsort(scores)[::-1][:effective_top_k]
-            return [context_list[index] for index in ranked_indices.tolist()]
+            return ranked_indices.tolist()
         except Exception as error:
             logger.warning(
                 "LocalSemanticReranker: rerank failed (%s: %s). Returning BM25 order.",
                 type(error).__name__,
                 error,
             )
-            return context_list[:effective_top_k]
+            return list(range(effective_top_k))

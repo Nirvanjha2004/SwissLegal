@@ -63,22 +63,52 @@ def load_inputs(config: SystemConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
     return train_df, test_df, laws_df
 
 
-def build_law_corpus(laws_df: pd.DataFrame) -> list[str]:
-    """Build law document corpus from supported text fields."""
+def build_law_corpus(laws_df: pd.DataFrame) -> list[tuple[str, str]]:
+    """Build citation-text law corpus from supported fields."""
     if laws_df.empty:
         LOGGER.warning("No laws available; corpus generation skipped.")
         return []
 
+    citation_column = None
+    for candidate in ["citation", "citations", "source_id", "id"]:
+        if candidate in laws_df.columns:
+            citation_column = candidate
+            break
+
+    if citation_column is None:
+        LOGGER.warning("No citation column found in laws data. Using generated IDs.")
+
     text_columns = [column for column in ["text", "law_text", "article_text", "content"] if column in laws_df.columns]
     if not text_columns:
         LOGGER.warning("No known law text column found. Falling back to concatenating all columns.")
-        corpus = laws_df.astype(str).agg(" ".join, axis=1).tolist()
-    else:
-        corpus = laws_df[text_columns].astype(str).agg(" ".join, axis=1).tolist()
+        text_columns = list(laws_df.columns)
 
-    cleaned = [document.strip() for document in corpus if str(document).strip()]
-    LOGGER.info("Law corpus ready: %s documents", len(cleaned))
-    return cleaned
+    corpus: list[tuple[str, str]] = []
+    for row_index, row in laws_df.iterrows():
+        citation = str(row.get(citation_column, f"doc_{row_index}")) if citation_column else f"doc_{row_index}"
+        citation = citation.strip()
+        text = " ".join(str(row.get(column, "")) for column in text_columns).strip()
+        if citation and text:
+            corpus.append((citation, text))
+
+    unique_citations = len({citation for citation, _ in corpus})
+    LOGGER.info("Law corpus ready: %s documents (%s unique citations)", len(corpus), unique_citations)
+    return corpus
+
+
+def _collapse_citations(citations: list[str], max_items: int) -> str:
+    """Create a semicolon-separated unique citation string preserving order."""
+    unique: list[str] = []
+    seen: set[str] = set()
+    for citation in citations:
+        cleaned = str(citation).strip()
+        if not cleaned or cleaned in seen:
+            continue
+        unique.append(cleaned)
+        seen.add(cleaned)
+        if len(unique) >= max_items:
+            break
+    return ";".join(unique)
 
 
 def _select_query_column(test_df: pd.DataFrame) -> str | None:
@@ -101,6 +131,7 @@ def _build_empty_submission(test_df: pd.DataFrame) -> pd.DataFrame:
 def _optional_evaluate_on_train(
     train_df: pd.DataFrame,
     retriever: BM25Retriever,
+    retrieval_citations: list[str],
     config: SystemConfig,
 ) -> None:
     """Run optional retrieval-only evaluation when train columns allow it."""
@@ -145,7 +176,8 @@ def _optional_evaluate_on_train(
                 LOGGER.info("Optional evaluation progress: %s/%s", row_index, total_rows)
             continue
         results = retriever.search(query, top_k=config.bm25_top_k)
-        predictions.append(results[0].text if results else "")
+        top_citations = [retrieval_citations[result.index] for result in results if 0 <= result.index < len(retrieval_citations)]
+        predictions.append(_collapse_citations(top_citations, max_items=config.bm25_top_k))
         if row_index % config.eval_progress_interval == 0 or row_index == total_rows:
             LOGGER.info("Optional evaluation progress: %s/%s", row_index, total_rows)
 
@@ -200,7 +232,7 @@ def processRetrievalPipeline(
 
     stage_started = monitor.start_stage()
     chunked_laws = chunk_records(
-        ((str(index), document) for index, document in enumerate(law_documents)),
+        ((citation, text) for citation, text in law_documents),
         chunk_size=config.chunk_size,
         overlap=config.chunk_overlap,
     )
@@ -209,9 +241,11 @@ def processRetrievalPipeline(
 
     if not chunked_laws:
         LOGGER.warning("Law chunking yielded no chunks. Falling back to full law documents.")
-        retrieval_corpus = law_documents
+        retrieval_corpus = [text for _, text in law_documents]
+        retrieval_citations = [citation for citation, _ in law_documents]
     else:
         retrieval_corpus = [chunk.text for chunk in chunked_laws]
+        retrieval_citations = [chunk.source_id for chunk in chunked_laws]
 
     stage_started = monitor.start_stage()
     retriever = BM25Retriever(retrieval_corpus)
@@ -220,7 +254,7 @@ def processRetrievalPipeline(
 
     # Integrate evaluator in fail-soft mode when train labels are available.
     stage_started = monitor.start_stage()
-    _optional_evaluate_on_train(train_df, retriever, config)
+    _optional_evaluate_on_train(train_df, retriever, retrieval_citations, config)
     monitor.end_stage("optional_train_evaluation", stage_started)
 
     query_column = _select_query_column(test_df)
@@ -246,16 +280,18 @@ def processRetrievalPipeline(
             continue
 
         results = retriever.search(query, top_k=config.bm25_top_k)
-        contexts = [result.text for result in results]
+        ranked_indices = [result.index for result in results if 0 <= result.index < len(retrieval_corpus)]
+        contexts = [retrieval_corpus[index] for index in ranked_indices]
 
         if semantic_reranker is not None and contexts:
-            contexts = semantic_reranker.rerank(query, contexts, top_k=config.bm25_top_k)
+            reranked_positions = semantic_reranker.rerank_indices(query, contexts, top_k=config.bm25_top_k)
+            ranked_indices = [ranked_indices[position] for position in reranked_positions]
 
-        if llm is not None and contexts:
-            predictions.append(run_agent(query, contexts, llm, effective_agent_config))
-            used_agent_count += 1
-        elif contexts:
-            predictions.append(contexts[0])
+        ranked_citations = [retrieval_citations[index] for index in ranked_indices if 0 <= index < len(retrieval_citations)]
+        citation_prediction = _collapse_citations(ranked_citations, max_items=config.bm25_top_k)
+
+        if citation_prediction:
+            predictions.append(citation_prediction)
         else:
             no_result_count += 1
             predictions.append("")
