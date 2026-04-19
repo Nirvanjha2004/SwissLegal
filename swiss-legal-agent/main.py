@@ -40,16 +40,53 @@ class PipelineMonitoring:
 LOGGER = logging.getLogger(__name__)
 
 
-def load_inputs(config: SystemConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Load train/test/laws datasets with graceful missing-file handling."""
+def _extract_train_citations(train_df: pd.DataFrame) -> set[str]:
+    citations: set[str] = set()
+    if train_df.empty or "gold_citations" not in train_df.columns:
+        return citations
+
+    for value in train_df["gold_citations"].dropna():
+        parts = [part.strip() for part in str(value).split(";")]
+        citations.update(part for part in parts if part)
+    return citations
+
+
+def load_inputs(config: SystemConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load train/test/laws/court datasets with graceful missing-file handling."""
     train_df = load_dataset(config.train_file)
     test_df = load_dataset(config.test_file)
     laws_df = load_dataset(config.laws_file)
+    court_df = load_dataset(config.court_file)
+
+    if not court_df.empty and "citation" in court_df.columns:
+        original_court_rows = len(court_df)
+        train_citations = _extract_train_citations(train_df)
+
+        if train_citations:
+            filtered_court_df = court_df[court_df["citation"].astype(str).isin(train_citations)]
+            if not filtered_court_df.empty:
+                court_df = filtered_court_df
+                LOGGER.info(
+                    "Court corpus filtered by training citations: kept_rows=%s original_rows=%s unique_train_citations=%s",
+                    len(court_df),
+                    original_court_rows,
+                    len(train_citations),
+                )
+
+        court_df = court_df.drop_duplicates(subset=["citation"], keep="first")
+        if len(court_df) > config.max_court_records:
+            court_df = court_df.head(config.max_court_records)
+            LOGGER.info(
+                "Court corpus capped: max_court_records=%s selected_rows=%s",
+                config.max_court_records,
+                len(court_df),
+            )
 
     availability = {
         "train_rows": len(train_df),
         "test_rows": len(test_df),
         "laws_rows": len(laws_df),
+        "court_rows": len(court_df),
     }
     LOGGER.info("Input loading completed: %s", availability)
 
@@ -59,32 +96,34 @@ def load_inputs(config: SystemConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.Da
         LOGGER.warning("Test data unavailable or empty: %s", config.test_file)
     if laws_df.empty:
         LOGGER.warning("Laws data unavailable or empty: %s", config.laws_file)
+    if court_df.empty:
+        LOGGER.warning("Court considerations data unavailable or empty: %s", config.court_file)
 
-    return train_df, test_df, laws_df
+    return train_df, test_df, laws_df, court_df
 
 
-def build_law_corpus(laws_df: pd.DataFrame) -> list[tuple[str, str]]:
-    """Build citation-text law corpus from supported fields."""
-    if laws_df.empty:
-        LOGGER.warning("No laws available; corpus generation skipped.")
+def build_law_corpus(frame: pd.DataFrame, source_name: str) -> list[tuple[str, str]]:
+    """Build citation-text corpus from a retrieval source DataFrame."""
+    if frame.empty:
+        LOGGER.warning("No records available for source '%s'; corpus generation skipped.", source_name)
         return []
 
     citation_column = None
     for candidate in ["citation", "citations", "source_id", "id"]:
-        if candidate in laws_df.columns:
+        if candidate in frame.columns:
             citation_column = candidate
             break
 
     if citation_column is None:
         LOGGER.warning("No citation column found in laws data. Using generated IDs.")
 
-    text_columns = [column for column in ["text", "law_text", "article_text", "content"] if column in laws_df.columns]
+    text_columns = [column for column in ["text", "title", "law_text", "article_text", "content"] if column in frame.columns]
     if not text_columns:
-        LOGGER.warning("No known law text column found. Falling back to concatenating all columns.")
-        text_columns = list(laws_df.columns)
+        LOGGER.warning("No known text column found for source '%s'. Falling back to concatenating all columns.", source_name)
+        text_columns = list(frame.columns)
 
     corpus: list[tuple[str, str]] = []
-    for row_index, row in laws_df.iterrows():
+    for row_index, row in frame.iterrows():
         citation = str(row.get(citation_column, f"doc_{row_index}")) if citation_column else f"doc_{row_index}"
         citation = citation.strip()
         text = " ".join(str(row.get(column, "")) for column in text_columns).strip()
@@ -92,7 +131,7 @@ def build_law_corpus(laws_df: pd.DataFrame) -> list[tuple[str, str]]:
             corpus.append((citation, text))
 
     unique_citations = len({citation for citation, _ in corpus})
-    LOGGER.info("Law corpus ready: %s documents (%s unique citations)", len(corpus), unique_citations)
+    LOGGER.info("Source corpus ready: source=%s documents=%s unique_citations=%s", source_name, len(corpus), unique_citations)
     return corpus
 
 
@@ -177,7 +216,7 @@ def _optional_evaluate_on_train(
             continue
         results = retriever.search(query, top_k=config.bm25_top_k)
         top_citations = [retrieval_citations[result.index] for result in results if 0 <= result.index < len(retrieval_citations)]
-        predictions.append(_collapse_citations(top_citations, max_items=config.bm25_top_k))
+        predictions.append(_collapse_citations(top_citations, max_items=config.output_top_k))
         if row_index % config.eval_progress_interval == 0 or row_index == total_rows:
             LOGGER.info("Optional evaluation progress: %s/%s", row_index, total_rows)
 
@@ -195,6 +234,7 @@ def processRetrievalPipeline(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
     laws_df: pd.DataFrame,
+    court_df: pd.DataFrame,
     config: SystemConfig,
     semantic_reranker: LocalSemanticReranker | None = None,
     llm: Any | None = None,
@@ -212,6 +252,7 @@ def processRetrievalPipeline(
     monitor.add_count("train_rows", len(train_df))
     monitor.add_count("test_rows", len(test_df))
     monitor.add_count("laws_rows", len(laws_df))
+    monitor.add_count("court_rows", len(court_df))
     monitor.end_stage("input_summary", started)
 
     if test_df.empty:
@@ -219,11 +260,15 @@ def processRetrievalPipeline(
         return pd.DataFrame()
 
     stage_started = monitor.start_stage()
-    law_documents = build_law_corpus(laws_df)
+    law_documents = build_law_corpus(laws_df, source_name="laws")
+    court_documents = build_law_corpus(court_df, source_name="court")
+    corpus_documents = law_documents + court_documents
     monitor.add_count("law_documents", len(law_documents))
+    monitor.add_count("court_documents", len(court_documents))
+    monitor.add_count("corpus_documents", len(corpus_documents))
     monitor.end_stage("build_corpus", stage_started)
 
-    if not law_documents:
+    if not corpus_documents:
         LOGGER.warning("No law documents available. Returning empty predictions for all test rows.")
         empty_submission = _build_empty_submission(test_df)
         monitor.add_count("predictions", len(empty_submission))
@@ -232,7 +277,7 @@ def processRetrievalPipeline(
 
     stage_started = monitor.start_stage()
     chunked_laws = chunk_records(
-        ((citation, text) for citation, text in law_documents),
+        ((citation, text) for citation, text in corpus_documents),
         chunk_size=config.chunk_size,
         overlap=config.chunk_overlap,
     )
@@ -241,8 +286,8 @@ def processRetrievalPipeline(
 
     if not chunked_laws:
         LOGGER.warning("Law chunking yielded no chunks. Falling back to full law documents.")
-        retrieval_corpus = [text for _, text in law_documents]
-        retrieval_citations = [citation for citation, _ in law_documents]
+        retrieval_corpus = [text for _, text in corpus_documents]
+        retrieval_citations = [citation for citation, _ in corpus_documents]
     else:
         retrieval_corpus = [chunk.text for chunk in chunked_laws]
         retrieval_citations = [chunk.source_id for chunk in chunked_laws]
@@ -266,7 +311,6 @@ def processRetrievalPipeline(
 
     stage_started = monitor.start_stage()
     predictions: list[str] = []
-    used_agent_count = 0
     empty_query_count = 0
     no_result_count = 0
 
@@ -288,7 +332,7 @@ def processRetrievalPipeline(
             ranked_indices = [ranked_indices[position] for position in reranked_positions]
 
         ranked_citations = [retrieval_citations[index] for index in ranked_indices if 0 <= index < len(retrieval_citations)]
-        citation_prediction = _collapse_citations(ranked_citations, max_items=config.bm25_top_k)
+        citation_prediction = _collapse_citations(ranked_citations, max_items=config.output_top_k)
 
         if citation_prediction:
             predictions.append(citation_prediction)
@@ -321,7 +365,7 @@ def processRetrievalPipeline(
     monitor.end_stage("submission", stage_started)
 
     monitor.add_count("predictions", len(predictions))
-    monitor.add_count("agent_predictions", used_agent_count)
+    monitor.add_count("agent_predictions", 0)
     monitor.add_count("empty_queries", empty_query_count)
     monitor.add_count("no_retrieval_results", no_result_count)
     LOGGER.info("Pipeline monitoring summary: durations=%s counters=%s", monitor.stage_durations, monitor.counters)
@@ -342,11 +386,12 @@ def main() -> None:
 
     semantic_reranker = LocalSemanticReranker(config.embedding_model_path)
 
-    train_df, test_df, laws_df = load_inputs(config)
+    train_df, test_df, laws_df, court_df = load_inputs(config)
     submission = processRetrievalPipeline(
         train_df,
         test_df,
         laws_df,
+        court_df,
         config,
         semantic_reranker=semantic_reranker,
     )

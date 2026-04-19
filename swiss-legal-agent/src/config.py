@@ -34,11 +34,14 @@ TRAIN_FILE = RAW_DATA_DIR / "train.csv"
 TEST_FILE = RAW_DATA_DIR / "test.csv"
 VAL_FILE = RAW_DATA_DIR / "val.csv"
 LAWS_FILE = RAW_DATA_DIR / "laws_de.csv"
+COURT_FILE = RAW_DATA_DIR / "court_considerations.csv"
 SUBMISSION_FILE = PROJECT_ROOT / "submission.csv"
 
 # Default configuration values
 DEFAULT_BM25_TOP_K = 10
 DEFAULT_VECTOR_TOP_K = 10
+DEFAULT_OUTPUT_TOP_K = 5
+DEFAULT_MAX_COURT_RECORDS = 250000
 DEFAULT_CHUNK_SIZE = 4000
 DEFAULT_CHUNK_OVERLAP = 200
 DEFAULT_MODEL_NAME = "local-hf-model"
@@ -56,6 +59,8 @@ class SystemConfig:
         self,
         bm25_top_k: Any = None,
         vector_top_k: Any = None,
+        output_top_k: Any = None,
+        max_court_records: Any = None,
         chunk_size: Any = None,
         chunk_overlap: Any = None,
         model_name: Any = None,
@@ -65,6 +70,7 @@ class SystemConfig:
         train_file: Any = None,
         test_file: Any = None,
         laws_file: Any = None,
+        court_file: Any = None,
         submission_file: Any = None
     ):
         """
@@ -73,6 +79,8 @@ class SystemConfig:
         Args:
             bm25_top_k: Number of top results for BM25 retrieval
             vector_top_k: Number of top results for vector retrieval
+            output_top_k: Number of citations written to submission per query
+            max_court_records: Maximum court records used for indexing
             chunk_size: Size of text chunks
             chunk_overlap: Overlap between chunks
             model_name: Name of the language model
@@ -82,6 +90,7 @@ class SystemConfig:
             train_file: Path to training data file
             test_file: Path to test data file
             laws_file: Path to laws data file
+            court_file: Path to court considerations data file
             submission_file: Path to submission output file
         """
         # Validate and set retrieval parameters
@@ -91,6 +100,14 @@ class SystemConfig:
         
         self.vector_top_k = validate_and_default_positive_int(
             vector_top_k, DEFAULT_VECTOR_TOP_K, "vector_top_k", "SystemConfig"
+        )
+
+        self.output_top_k = validate_and_default_positive_int(
+            output_top_k, DEFAULT_OUTPUT_TOP_K, "output_top_k", "SystemConfig"
+        )
+
+        self.max_court_records = validate_and_default_positive_int(
+            max_court_records, DEFAULT_MAX_COURT_RECORDS, "max_court_records", "SystemConfig"
         )
         
         # Validate chunking parameters with interdependent constraints
@@ -160,6 +177,10 @@ class SystemConfig:
         self.laws_file = validate_and_default_path(
             laws_file, LAWS_FILE, "laws_file", "SystemConfig", must_exist=False
         )
+
+        self.court_file = validate_and_default_path(
+            court_file, COURT_FILE, "court_file", "SystemConfig", must_exist=False
+        )
         
         self.submission_file = validate_and_default_path(
             submission_file, SUBMISSION_FILE, "submission_file", "SystemConfig", must_exist=False
@@ -168,11 +189,13 @@ class SystemConfig:
         # Log configuration summary
         logger.info(
             "SystemConfig initialized: chunk_size=%s, chunk_overlap=%s, bm25_top_k=%s, "
-            "vector_top_k=%s, model_name='%s', embedding_model_path='%s', enable_train_eval=%s, eval_progress_interval=%s",
+            "vector_top_k=%s, output_top_k=%s, max_court_records=%s, model_name='%s', embedding_model_path='%s', enable_train_eval=%s, eval_progress_interval=%s",
             self.chunk_size,
             self.chunk_overlap,
             self.bm25_top_k,
             self.vector_top_k,
+            self.output_top_k,
+            self.max_court_records,
             self.model_name,
             self.embedding_model_path,
             self.enable_train_eval,
@@ -280,6 +303,8 @@ def load_config_from_env() -> SystemConfig:
     Supported environment variables:
     - BM25_TOP_K
     - VECTOR_TOP_K
+    - OUTPUT_TOP_K
+    - MAX_COURT_RECORDS
     - CHUNK_SIZE
     - CHUNK_OVERLAP
     - MODEL_NAME
@@ -289,11 +314,14 @@ def load_config_from_env() -> SystemConfig:
     - TRAIN_FILE
     - TEST_FILE
     - LAWS_FILE
+    - COURT_FILE
     - SUBMISSION_FILE
     """
     config = SystemConfig(
         bm25_top_k=_get_env_int("BM25_TOP_K"),
         vector_top_k=_get_env_int("VECTOR_TOP_K"),
+        output_top_k=_get_env_int("OUTPUT_TOP_K"),
+        max_court_records=_get_env_int("MAX_COURT_RECORDS"),
         chunk_size=_get_env_int("CHUNK_SIZE"),
         chunk_overlap=_get_env_int("CHUNK_OVERLAP"),
         model_name=_get_env_str("MODEL_NAME"),
@@ -303,14 +331,17 @@ def load_config_from_env() -> SystemConfig:
         train_file=_get_env_path("TRAIN_FILE"),
         test_file=_get_env_path("TEST_FILE"),
         laws_file=_get_env_path("LAWS_FILE"),
+        court_file=_get_env_path("COURT_FILE"),
         submission_file=_get_env_path("SUBMISSION_FILE"),
     )
     logger.info(
         "SystemConfig loaded from environment with validation and default substitution. "
-        "bm25_top_k=%s vector_top_k=%s chunk_size=%s chunk_overlap=%s model_name=%s embedding_model_path=%s "
+        "bm25_top_k=%s vector_top_k=%s output_top_k=%s max_court_records=%s chunk_size=%s chunk_overlap=%s model_name=%s embedding_model_path=%s "
         "enable_train_eval=%s eval_progress_interval=%s",
         config.bm25_top_k,
         config.vector_top_k,
+        config.output_top_k,
+        config.max_court_records,
         config.chunk_size,
         config.chunk_overlap,
         config.model_name,
@@ -331,6 +362,8 @@ def validate_config_on_startup(config: SystemConfig) -> dict[str, Any]:
     summary = {
         "bm25_top_k": config.bm25_top_k,
         "vector_top_k": config.vector_top_k,
+        "output_top_k": config.output_top_k,
+        "max_court_records": config.max_court_records,
         "chunk_size": config.chunk_size,
         "chunk_overlap": config.chunk_overlap,
         "model_name": config.model_name,
@@ -340,6 +373,7 @@ def validate_config_on_startup(config: SystemConfig) -> dict[str, Any]:
         "train_file": str(config.train_file),
         "test_file": str(config.test_file),
         "laws_file": str(config.laws_file),
+        "court_file": str(config.court_file),
         "submission_file": str(config.submission_file),
     }
     logger.info("Startup configuration validated: %s", summary)
