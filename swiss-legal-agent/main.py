@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from time import perf_counter
 from typing import Any
 
@@ -15,9 +17,10 @@ from src.config import (
     validate_config_on_startup,
 )
 from src.data_loader import load_dataset
-from src.evaluator import evaluate_predictions
+from src.evaluator import evaluate_predictions, compute_citation_set_f1
 from src.retriever import BM25Retriever
 from src.semantic_reranker import LocalSemanticReranker
+from src.semantic_reranker import LocalSemanticRetriever
 
 
 @dataclass
@@ -135,12 +138,41 @@ def build_law_corpus(frame: pd.DataFrame, source_name: str) -> list[tuple[str, s
     return corpus
 
 
+def _normalize_citation_article_only(citation: str) -> str:
+    """Normalize a citation to article-only style, e.g. 'Art. 43 VNF'."""
+    cleaned = " ".join(str(citation).strip().split())
+    if not cleaned:
+        return ""
+
+    art_match = re.search(r"\bArt\.\s*([0-9]+[a-zA-Z]*)", cleaned)
+    if art_match is None:
+        return cleaned
+
+    article_number = art_match.group(1)
+    tokens = [token.strip(" ,.;:()[]{}") for token in cleaned.split()]
+
+    source_token = ""
+    for token in reversed(tokens):
+        if not token:
+            continue
+        if token.lower() in {"art", "art.", "abs", "abs."}:
+            continue
+        # Keep only meaningful law identifiers (letters or dotted numeric code).
+        if any(character.isalpha() for character in token) or "." in token:
+            source_token = token
+            break
+
+    if source_token:
+        return f"Art. {article_number} {source_token}"
+    return f"Art. {article_number}"
+
+
 def _collapse_citations(citations: list[str], max_items: int) -> str:
     """Create a semicolon-separated unique citation string preserving order."""
     unique: list[str] = []
     seen: set[str] = set()
     for citation in citations:
-        cleaned = str(citation).strip()
+        cleaned = _normalize_citation_article_only(str(citation))
         if not cleaned or cleaned in seen:
             continue
         unique.append(cleaned)
@@ -230,6 +262,143 @@ def _optional_evaluate_on_train(
     )
 
 
+def auto_tune_output_top_k(
+    train_df: pd.DataFrame,
+    laws_df: pd.DataFrame,
+    court_df: pd.DataFrame,
+    config: SystemConfig,
+    semantic_reranker: LocalSemanticReranker | None = None,
+    candidate_top_k_values: list[int] | None = None,
+    validation_split: float = 0.2,
+    max_validation_rows: int = 20,
+) -> tuple[int, dict[int, float]]:
+    """
+    Auto-tune OUTPUT_TOP_K by computing citation set-F1 on a validation split.
+    
+    Args:
+        train_df: Training DataFrame with query and gold_citations columns
+        laws_df: Laws corpus DataFrame
+        court_df: Court corpus DataFrame
+        config: SystemConfig instance
+        semantic_reranker: Optional semantic reranker
+        candidate_top_k_values: Values to test (default [2, 3, 4, 5, 10])
+        validation_split: Fraction of train data to use for validation (default 0.2)
+        max_validation_rows: Maximum number of validation rows to keep tuning fast
+        
+    Returns:
+        Tuple of (best_output_top_k, results_dict where key=top_k, value=set_f1_score)
+    """
+    if candidate_top_k_values is None:
+        candidate_top_k_values = [2, 3, 4, 5, 10]
+
+    # Normalize candidates to deterministic positive unique integers.
+    candidate_top_k_values = sorted({int(value) for value in candidate_top_k_values if int(value) > 0})
+    if not candidate_top_k_values:
+        LOGGER.warning("Auto-tune skipped: no valid candidate OUTPUT_TOP_K values.")
+        return config.output_top_k, {}
+    
+    if train_df.empty or "gold_citations" not in train_df.columns:
+        LOGGER.warning("Auto-tune skipped: no gold_citations in training data.")
+        return config.output_top_k, {}
+    
+    query_column = _select_query_column(train_df)
+    if query_column is None:
+        LOGGER.warning("Auto-tune skipped: no supported query column in training data.")
+        return config.output_top_k, {}
+    
+    # Create validation split (capped to reduce tuning runtime).
+    validation_size = max(1, int(len(train_df) * validation_split))
+    validation_size = min(validation_size, max_validation_rows)
+    val_df = train_df.sample(n=validation_size, random_state=42).copy()
+    
+    LOGGER.info(
+        "Auto-tune OUTPUT_TOP_K started: validation_size=%s total_train=%s candidates=%s",
+        len(val_df),
+        len(train_df),
+        candidate_top_k_values,
+    )
+    
+    # Build corpus once (shared across all candidates)
+    law_documents = build_law_corpus(laws_df, source_name="laws")
+    court_documents = build_law_corpus(court_df, source_name="court")
+    corpus_documents = law_documents + court_documents
+    
+    if not corpus_documents:
+        LOGGER.warning("Auto-tune skipped: no corpus documents available.")
+        return config.output_top_k, {}
+    
+    chunked_corpus = chunk_records(
+        ((citation, text) for citation, text in corpus_documents),
+        chunk_size=config.chunk_size,
+        overlap=config.chunk_overlap,
+    )
+    
+    if not chunked_corpus:
+        LOGGER.warning("Auto-tune skipped: chunking yielded no chunks.")
+        return config.output_top_k, {}
+    
+    retrieval_corpus = [chunk.text for chunk in chunked_corpus]
+    retrieval_citations = [chunk.source_id for chunk in chunked_corpus]
+    
+    retriever = BM25Retriever(retrieval_corpus)
+    
+    # Compute ranked citations once per query, then cheaply score all candidate OUTPUT_TOP_K values.
+    ranked_citations_per_query: list[list[str]] = []
+    total_queries = len(val_df)
+    progress_interval = max(10, min(config.eval_progress_interval, 25))
+    LOGGER.info(
+        "Auto-tune retrieval pass started: validation_queries=%s progress_interval=%s",
+        total_queries,
+        progress_interval,
+    )
+    for row_index, (_, row) in enumerate(val_df.iterrows(), start=1):
+        query = str(row.get(query_column, "")).strip()
+        if not query:
+            ranked_citations_per_query.append([])
+            if row_index % progress_interval == 0 or row_index == total_queries:
+                LOGGER.info("Auto-tune retrieval progress: %s/%s", row_index, total_queries)
+            continue
+
+        results_ranked = retriever.search(query, top_k=config.bm25_top_k)
+        ranked_indices = [result.index for result in results_ranked if 0 <= result.index < len(retrieval_corpus)]
+        contexts = [retrieval_corpus[index] for index in ranked_indices]
+
+        if semantic_reranker is not None and contexts:
+            reranked_positions = semantic_reranker.rerank_indices(query, contexts, top_k=config.bm25_top_k)
+            ranked_indices = [ranked_indices[position] for position in reranked_positions]
+
+        ranked_citations = [retrieval_citations[index] for index in ranked_indices if 0 <= index < len(retrieval_citations)]
+        ranked_citations_per_query.append(ranked_citations)
+
+        if row_index % progress_interval == 0 or row_index == total_queries:
+            LOGGER.info("Auto-tune retrieval progress: %s/%s", row_index, total_queries)
+
+    # Score each candidate using cached rankings.
+    gold_citations = list(val_df["gold_citations"].astype(str))
+    results: dict[int, float] = {}
+    for candidate_top_k in candidate_top_k_values:
+        predictions = [
+            _collapse_citations(ranked_citations, max_items=candidate_top_k)
+            for ranked_citations in ranked_citations_per_query
+        ]
+        set_f1_score = compute_citation_set_f1(gold_citations, predictions)
+        results[candidate_top_k] = set_f1_score
+        LOGGER.info("Auto-tune result: output_top_k=%s set_f1=%.6f", candidate_top_k, set_f1_score)
+    
+    # Find best
+    best_top_k = max(results.keys(), key=lambda k: results[k])
+    best_score = results[best_top_k]
+    
+    LOGGER.info(
+        "Auto-tune completed: best_output_top_k=%s best_set_f1=%.6f all_results=%s",
+        best_top_k,
+        best_score,
+        {k: f"{v:.6f}" for k, v in sorted(results.items())},
+    )
+    
+    return best_top_k, results
+
+
 def processRetrievalPipeline(
     train_df: pd.DataFrame,
     test_df: pd.DataFrame,
@@ -294,6 +463,13 @@ def processRetrievalPipeline(
 
     stage_started = monitor.start_stage()
     retriever = BM25Retriever(retrieval_corpus)
+    dense_retriever = None
+    if semantic_reranker is not None and semantic_reranker.model is not None:
+        dense_retriever = LocalSemanticRetriever(semantic_reranker, retrieval_corpus)
+        if dense_retriever.ready:
+            LOGGER.info("Hybrid retrieval enabled: bm25_top_k=%s vector_top_k=%s", config.bm25_top_k, config.vector_top_k)
+        else:
+            LOGGER.info("Hybrid retrieval fallback: dense retriever unavailable, BM25-only mode.")
     monitor.add_count("retrieval_corpus_size", len(retrieval_corpus))
     monitor.end_stage("init_retriever", stage_started)
 
@@ -323,8 +499,34 @@ def processRetrievalPipeline(
             predictions.append("")
             continue
 
-        results = retriever.search(query, top_k=config.bm25_top_k)
-        ranked_indices = [result.index for result in results if 0 <= result.index < len(retrieval_corpus)]
+        bm25_results = retriever.search(query, top_k=config.bm25_top_k)
+        bm25_indices = [result.index for result in bm25_results if 0 <= result.index < len(retrieval_corpus)]
+
+        dense_results: list[tuple[int, float]] = []
+        if dense_retriever is not None and dense_retriever.ready:
+            dense_results = dense_retriever.search(query, top_k=config.vector_top_k)
+
+        # Weighted fusion of BM25 rank and dense cosine similarity.
+        fused_scores: dict[int, float] = {}
+        bm25_count = max(1, len(bm25_indices))
+        for rank, index in enumerate(bm25_indices):
+            bm25_rank_score = (bm25_count - rank) / bm25_count
+            fused_scores[index] = fused_scores.get(index, 0.0) + (0.6 * bm25_rank_score)
+
+        for index, dense_score in dense_results:
+            if 0 <= index < len(retrieval_corpus):
+                dense_norm = (dense_score + 1.0) / 2.0
+                fused_scores[index] = fused_scores.get(index, 0.0) + (0.4 * dense_norm)
+
+        ranked_indices = [
+            index for index, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
+        ]
+        if not ranked_indices:
+            ranked_indices = bm25_indices
+
+        # Keep candidate pool bounded before optional semantic reranking.
+        candidate_pool_size = max(config.bm25_top_k, config.vector_top_k)
+        ranked_indices = ranked_indices[:candidate_pool_size]
         contexts = [retrieval_corpus[index] for index in ranked_indices]
 
         if semantic_reranker is not None and contexts:
@@ -387,6 +589,44 @@ def main() -> None:
     semantic_reranker = LocalSemanticReranker(config.embedding_model_path)
 
     train_df, test_df, laws_df, court_df = load_inputs(config)
+
+    # Use val.csv when available to strengthen tuning signal.
+    val_file = config.train_file.parent / "val.csv"
+    val_df = load_dataset(Path(val_file))
+    tuning_df = train_df
+    if not val_df.empty and {"query", "gold_citations"}.issubset(set(val_df.columns)):
+        tuning_df = pd.concat([train_df, val_df], ignore_index=True)
+        LOGGER.info(
+            "Tuning dataset expanded with validation set: train_rows=%s val_rows=%s combined_rows=%s",
+            len(train_df),
+            len(val_df),
+            len(tuning_df),
+        )
+    
+    # Auto-tune OUTPUT_TOP_K on training data
+    LOGGER.info("=== AUTO-TUNING OUTPUT_TOP_K ===")
+    best_output_top_k, tune_results = auto_tune_output_top_k(
+        tuning_df,
+        laws_df,
+        court_df,
+        config,
+        semantic_reranker=None,
+    )
+    
+    # Update config with best value
+    original_output_top_k = config.output_top_k
+    tuned_output_top_k = best_output_top_k
+    submission_output_top_k = 2
+    config.output_top_k = min(tuned_output_top_k, submission_output_top_k)
+    LOGGER.info(
+        "OUTPUT_TOP_K updated: original=%s tuned=%s final=%s improvement=%.2f%%",
+        original_output_top_k,
+        tuned_output_top_k,
+        config.output_top_k,
+        ((tune_results.get(tuned_output_top_k, 0) - tune_results.get(original_output_top_k, 0)) / max(tune_results.get(original_output_top_k, 1), 0.001)) * 100 if tune_results else 0,
+    )
+    
+    LOGGER.info("=== GENERATING FINAL SUBMISSION ===")
     submission = processRetrievalPipeline(
         train_df,
         test_df,

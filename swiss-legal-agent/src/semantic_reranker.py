@@ -77,3 +77,77 @@ class LocalSemanticReranker:
                 error,
             )
             return list(range(effective_top_k))
+
+
+class LocalSemanticRetriever:
+    """Dense retriever backed by the same local SentenceTransformer model."""
+
+    def __init__(self, reranker: LocalSemanticReranker, corpus_texts: Iterable[str], batch_size: int = 256):
+        self.model = reranker.model
+        self.corpus_embeddings: np.ndarray | None = None
+        self.corpus_size = 0
+
+        texts = [str(text).strip() for text in corpus_texts if str(text).strip()]
+        self.corpus_size = len(texts)
+        if self.model is None:
+            logger.info("LocalSemanticRetriever: model unavailable, dense retrieval disabled.")
+            return
+        if not texts:
+            logger.info("LocalSemanticRetriever: empty corpus, dense retrieval disabled.")
+            return
+
+        try:
+            logger.info("LocalSemanticRetriever: encoding corpus for dense retrieval (size=%s)", len(texts))
+            embeddings = self.model.encode(
+                [f"passage: {text}" for text in texts],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+                batch_size=batch_size,
+            )
+            self.corpus_embeddings = np.asarray(embeddings, dtype=np.float32)
+            logger.info(
+                "LocalSemanticRetriever: corpus embedding index ready (rows=%s dim=%s)",
+                self.corpus_embeddings.shape[0],
+                self.corpus_embeddings.shape[1] if self.corpus_embeddings.ndim == 2 else 0,
+            )
+        except Exception as error:
+            logger.warning(
+                "LocalSemanticRetriever: failed to build dense index (%s: %s).",
+                type(error).__name__,
+                error,
+            )
+            self.corpus_embeddings = None
+
+    @property
+    def ready(self) -> bool:
+        return self.model is not None and self.corpus_embeddings is not None and self.corpus_embeddings.size > 0
+
+    def search(self, query: str, top_k: int) -> list[tuple[int, float]]:
+        if not self.ready or top_k <= 0:
+            return []
+
+        try:
+            query_embedding = self.model.encode(
+                [f"query: {query}"],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )[0]
+            scores = np.dot(self.corpus_embeddings, np.asarray(query_embedding, dtype=np.float32))
+            effective_top_k = min(top_k, len(scores))
+            if effective_top_k <= 0:
+                return []
+
+            if effective_top_k >= len(scores):
+                ranked_indices = np.argsort(scores)[::-1]
+            else:
+                candidate_indices = np.argpartition(scores, -effective_top_k)[-effective_top_k:]
+                ranked_indices = candidate_indices[np.argsort(scores[candidate_indices])[::-1]]
+
+            return [(int(index), float(scores[index])) for index in ranked_indices.tolist()]
+        except Exception as error:
+            logger.warning(
+                "LocalSemanticRetriever: search failed (%s: %s).",
+                type(error).__name__,
+                error,
+            )
+            return []

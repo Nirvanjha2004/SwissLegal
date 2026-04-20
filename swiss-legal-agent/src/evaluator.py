@@ -301,3 +301,100 @@ def evaluate_predictions(frame: pd.DataFrame, target_column: str, prediction_col
             f"Returning 0.0 as fallback."
         )
         return 0.0
+
+
+def compute_citation_set_f1(
+    gold_citations: list[str],
+    predicted_citations: list[str],
+    separator: str = ";"
+) -> float:
+    """
+    Compute set-F1 score for citation predictions (Kaggle Swiss Legal metric).
+    
+    For each sample, parses semicolon-separated citation strings into sets and computes:
+    - Precision = |predicted ∩ gold| / |predicted| if predicted is non-empty, else 0
+    - Recall = |predicted ∩ gold| / |gold| if gold is non-empty, else 1 (perfect for empty)
+    - F1 = 2 * (precision * recall) / (precision + recall) if denominator > 0, else 0
+    
+    Macro-averages F1 across all samples.
+    
+    Args:
+        gold_citations: List of ground-truth citation strings (semicolon-separated)
+        predicted_citations: List of predicted citation strings (semicolon-separated)
+        separator: Citation separator (default ";")
+        
+    Returns:
+        float: Macro-averaged set-F1 score between 0.0 and 1.0
+        
+    Raises:
+        ValueError: If input lists have mismatched lengths
+    """
+    if len(gold_citations) != len(predicted_citations):
+        logger.error(
+            f"Evaluator.compute_citation_set_f1: Length mismatch. "
+            f"Gold citations: {len(gold_citations)}, "
+            f"Predicted citations: {len(predicted_citations)}. "
+            f"Cannot compute F1 with unequal input sizes."
+        )
+        raise ValueError(f"Length mismatch: {len(gold_citations)} vs {len(predicted_citations)}")
+    
+    if not gold_citations:
+        logger.warning("Evaluator.compute_citation_set_f1: Empty input lists. Returning 0.0.")
+        return 0.0
+    
+    f1_scores = []
+    
+    for idx, (gold_str, pred_str) in enumerate(zip(gold_citations, predicted_citations)):
+        # Parse gold citations
+        gold_set = set()
+        if gold_str and isinstance(gold_str, str):
+            for citation in gold_str.split(separator):
+                cleaned = citation.strip()
+                if cleaned:
+                    gold_set.add(cleaned)
+        
+        # Parse predicted citations
+        pred_set = set()
+        if pred_str and isinstance(pred_str, str):
+            for citation in pred_str.split(separator):
+                cleaned = citation.strip()
+                if cleaned:
+                    pred_set.add(cleaned)
+        
+        # Compute intersection
+        intersection = gold_set & pred_set
+        
+        # Handle edge cases
+        if not gold_set and not pred_set:
+            # Both empty: perfect match
+            f1_scores.append(1.0)
+        elif not gold_set and pred_set:
+            # Gold empty but predicted non-empty: precision=0
+            f1_scores.append(0.0)
+        elif gold_set and not pred_set:
+            # Gold non-empty but predicted empty: recall=0
+            f1_scores.append(0.0)
+        else:
+            # Both non-empty: compute F1
+            precision = len(intersection) / len(pred_set) if pred_set else 0.0
+            recall = len(intersection) / len(gold_set) if gold_set else 0.0
+            
+            if precision + recall > 0:
+                f1 = 2 * (precision * recall) / (precision + recall)
+            else:
+                f1 = 0.0
+            
+            f1_scores.append(f1)
+    
+    # Macro-average
+    macro_f1_score = sum(f1_scores) / len(f1_scores) if f1_scores else 0.0
+    
+    logger.debug(
+        f"Evaluator.compute_citation_set_f1: Computed set-F1. "
+        f"Samples: {len(f1_scores)}, "
+        f"Mean F1: {macro_f1_score:.6f}, "
+        f"Min F1: {min(f1_scores) if f1_scores else 'N/A':.6f}, "
+        f"Max F1: {max(f1_scores) if f1_scores else 'N/A':.6f}"
+    )
+    
+    return macro_f1_score
