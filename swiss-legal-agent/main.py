@@ -182,6 +182,65 @@ def _collapse_citations(citations: list[str], max_items: int) -> str:
     return ";".join(unique)
 
 
+def _normalize_citation_string_for_scoring(citations: str) -> str:
+    parts = [part.strip() for part in str(citations).split(";")]
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    for part in parts:
+        cleaned = _normalize_citation_article_only(part)
+        if not cleaned or cleaned in seen:
+            continue
+        normalized.append(cleaned)
+        seen.add(cleaned)
+
+    return ";".join(normalized)
+
+
+def _rank_citations_for_query(
+    query: str,
+    retriever: BM25Retriever,
+    retrieval_corpus: list[str],
+    retrieval_citations: list[str],
+    config: SystemConfig,
+    dense_retriever: LocalSemanticRetriever | None = None,
+    semantic_reranker: LocalSemanticReranker | None = None,
+) -> list[str]:
+    bm25_results = retriever.search(query, top_k=config.bm25_top_k)
+    bm25_indices = [result.index for result in bm25_results if 0 <= result.index < len(retrieval_corpus)]
+
+    dense_results: list[tuple[int, float]] = []
+    if dense_retriever is not None and dense_retriever.ready:
+        dense_results = dense_retriever.search(query, top_k=config.vector_top_k)
+
+    fused_scores: dict[int, float] = {}
+    bm25_count = max(1, len(bm25_indices))
+    for rank, index in enumerate(bm25_indices):
+        bm25_rank_score = (bm25_count - rank) / bm25_count
+        fused_scores[index] = fused_scores.get(index, 0.0) + (0.6 * bm25_rank_score)
+
+    for index, dense_score in dense_results:
+        if 0 <= index < len(retrieval_corpus):
+            dense_norm = (dense_score + 1.0) / 2.0
+            fused_scores[index] = fused_scores.get(index, 0.0) + (0.4 * dense_norm)
+
+    ranked_indices = [
+        index for index, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
+    ]
+    if not ranked_indices:
+        ranked_indices = bm25_indices
+
+    candidate_pool_size = max(config.bm25_top_k, config.vector_top_k)
+    ranked_indices = ranked_indices[:candidate_pool_size]
+    contexts = [retrieval_corpus[index] for index in ranked_indices]
+
+    if semantic_reranker is not None and contexts:
+        reranked_positions = semantic_reranker.rerank_indices(query, contexts, top_k=config.bm25_top_k)
+        ranked_indices = [ranked_indices[position] for position in reranked_positions]
+
+    return [retrieval_citations[index] for index in ranked_indices if 0 <= index < len(retrieval_citations)]
+
+
 def _select_query_column(test_df: pd.DataFrame) -> str | None:
     for column in ["query", "question", "facts", "fact", "text"]:
         if column in test_df.columns:
@@ -341,6 +400,13 @@ def auto_tune_output_top_k(
     retrieval_citations = [chunk.source_id for chunk in chunked_corpus]
     
     retriever = BM25Retriever(retrieval_corpus)
+    dense_retriever = None
+    if semantic_reranker is not None and semantic_reranker.model is not None:
+        dense_retriever = LocalSemanticRetriever(semantic_reranker, retrieval_corpus)
+        if dense_retriever.ready:
+            LOGGER.info("Auto-tune hybrid retrieval enabled: bm25_top_k=%s vector_top_k=%s", config.bm25_top_k, config.vector_top_k)
+        else:
+            LOGGER.info("Auto-tune hybrid retrieval fallback: dense retriever unavailable, BM25-only mode.")
     
     # Compute ranked citations once per query, then cheaply score all candidate OUTPUT_TOP_K values.
     ranked_citations_per_query: list[list[str]] = []
@@ -359,26 +425,29 @@ def auto_tune_output_top_k(
                 LOGGER.info("Auto-tune retrieval progress: %s/%s", row_index, total_queries)
             continue
 
-        results_ranked = retriever.search(query, top_k=config.bm25_top_k)
-        ranked_indices = [result.index for result in results_ranked if 0 <= result.index < len(retrieval_corpus)]
-        contexts = [retrieval_corpus[index] for index in ranked_indices]
-
-        if semantic_reranker is not None and contexts:
-            reranked_positions = semantic_reranker.rerank_indices(query, contexts, top_k=config.bm25_top_k)
-            ranked_indices = [ranked_indices[position] for position in reranked_positions]
-
-        ranked_citations = [retrieval_citations[index] for index in ranked_indices if 0 <= index < len(retrieval_citations)]
+        ranked_citations = _rank_citations_for_query(
+            query,
+            retriever,
+            retrieval_corpus,
+            retrieval_citations,
+            config,
+            dense_retriever=dense_retriever,
+            semantic_reranker=semantic_reranker,
+        )
         ranked_citations_per_query.append(ranked_citations)
 
         if row_index % progress_interval == 0 or row_index == total_queries:
             LOGGER.info("Auto-tune retrieval progress: %s/%s", row_index, total_queries)
 
     # Score each candidate using cached rankings.
-    gold_citations = list(val_df["gold_citations"].astype(str))
+    gold_citations = [
+        _normalize_citation_string_for_scoring(value)
+        for value in val_df["gold_citations"].astype(str)
+    ]
     results: dict[int, float] = {}
     for candidate_top_k in candidate_top_k_values:
         predictions = [
-            _collapse_citations(ranked_citations, max_items=candidate_top_k)
+            _normalize_citation_string_for_scoring(_collapse_citations(ranked_citations, max_items=candidate_top_k))
             for ranked_citations in ranked_citations_per_query
         ]
         set_f1_score = compute_citation_set_f1(gold_citations, predictions)
@@ -499,41 +568,15 @@ def processRetrievalPipeline(
             predictions.append("")
             continue
 
-        bm25_results = retriever.search(query, top_k=config.bm25_top_k)
-        bm25_indices = [result.index for result in bm25_results if 0 <= result.index < len(retrieval_corpus)]
-
-        dense_results: list[tuple[int, float]] = []
-        if dense_retriever is not None and dense_retriever.ready:
-            dense_results = dense_retriever.search(query, top_k=config.vector_top_k)
-
-        # Weighted fusion of BM25 rank and dense cosine similarity.
-        fused_scores: dict[int, float] = {}
-        bm25_count = max(1, len(bm25_indices))
-        for rank, index in enumerate(bm25_indices):
-            bm25_rank_score = (bm25_count - rank) / bm25_count
-            fused_scores[index] = fused_scores.get(index, 0.0) + (0.6 * bm25_rank_score)
-
-        for index, dense_score in dense_results:
-            if 0 <= index < len(retrieval_corpus):
-                dense_norm = (dense_score + 1.0) / 2.0
-                fused_scores[index] = fused_scores.get(index, 0.0) + (0.4 * dense_norm)
-
-        ranked_indices = [
-            index for index, _ in sorted(fused_scores.items(), key=lambda item: item[1], reverse=True)
-        ]
-        if not ranked_indices:
-            ranked_indices = bm25_indices
-
-        # Keep candidate pool bounded before optional semantic reranking.
-        candidate_pool_size = max(config.bm25_top_k, config.vector_top_k)
-        ranked_indices = ranked_indices[:candidate_pool_size]
-        contexts = [retrieval_corpus[index] for index in ranked_indices]
-
-        if semantic_reranker is not None and contexts:
-            reranked_positions = semantic_reranker.rerank_indices(query, contexts, top_k=config.bm25_top_k)
-            ranked_indices = [ranked_indices[position] for position in reranked_positions]
-
-        ranked_citations = [retrieval_citations[index] for index in ranked_indices if 0 <= index < len(retrieval_citations)]
+        ranked_citations = _rank_citations_for_query(
+            query,
+            retriever,
+            retrieval_corpus,
+            retrieval_citations,
+            config,
+            dense_retriever=dense_retriever,
+            semantic_reranker=semantic_reranker,
+        )
         citation_prediction = _collapse_citations(ranked_citations, max_items=config.output_top_k)
 
         if citation_prediction:
@@ -610,7 +653,7 @@ def main() -> None:
         laws_df,
         court_df,
         config,
-        semantic_reranker=None,
+        semantic_reranker=semantic_reranker,
     )
     
     # Update config with best value
